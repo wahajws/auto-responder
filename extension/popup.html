@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LinkedIn Auto-Reply Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 300px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      color: #333;
+      padding: 16px;
+      background: #fff;
+    }
+    h2 {
+      font-size: 15px;
+      margin-bottom: 14px;
+      color: #0a66c2;
+    }
+    .field {
+      margin-bottom: 12px;
+    }
+    .field label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: #555;
+    }
+    .field select,
+    .field input[type="number"] {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+    }
+    .field select:focus,
+    .field input:focus {
+      border-color: #0a66c2;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .toggle-row span {
+      font-size: 12px;
+      font-weight: 600;
+      color: #555;
+    }
+    /* Toggle switch */
+    .switch {
+      position: relative;
+      width: 40px;
+      height: 22px;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      inset: 0;
+      background: #ccc;
+      border-radius: 22px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .slider::before {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    input:checked + .slider {
+      background: #0a66c2;
+    }
+    input:checked + .slider::before {
+      transform: translateX(18px);
+    }
+    .save-btn {
+      width: 100%;
+      padding: 8px;
+      background: #0a66c2;
+      color: #fff;
+      border: none;
+      border-radius: 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 4px;
+      transition: background 0.15s;
+    }
+    .save-btn:hover { background: #004182; }
+    .status {
+      text-align: center;
+      margin-top: 8px;
+      font-size: 11px;
+      color: #057642;
+      min-height: 16px;
+    }
+  </style>
+</head>
+<body>
+  <h2>⚙️ LinkedIn Auto-Reply</h2>
+
+  <div class="toggle-row">
+    <span>Extension Enabled</span>
+    <label class="switch">
+      <input type="checkbox" id="enabled" />
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label for="tone">Default Tone</label>
+    <select id="tone">
+      <option value="professional">Professional</option>
+      <option value="friendly">Friendly</option>
+      <option value="concise">Concise</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="maxTurns">Max Conversation Turns</label>
+    <input type="number" id="maxTurns" min="1" max="50" value="12" />
+  </div>
+
+  <div class="toggle-row">
+    <span>Show "Approve &amp; Send" Button</span>
+    <label class="switch">
+      <input type="checkbox" id="showApproveSend" />
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <button class="save-btn" id="saveBtn">Save Settings</button>
+  <div class="status" id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

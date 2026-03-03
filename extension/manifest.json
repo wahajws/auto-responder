@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "LinkedIn Auto-Reply (Qwen)",
+  "version": "1.0.0",
+  "description": "Auto-generate LinkedIn message replies using Qwen AI via DashScope.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.linkedin.com/*",
+    "http://localhost:3000/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/messaging/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "LinkedIn Auto-Reply Settings"
+  },
+  "icons": {}
+}

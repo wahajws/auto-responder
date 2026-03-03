@@ -1,0 +1,259 @@
+/* ============================================================
+   LinkedIn Auto-Reply (Qwen) — Injected UI Styles
+   ============================================================ */
+
+/* --- Container for the generate button (sits above composer) --- */
+.qwen-btn-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  box-sizing: border-box;
+}
+
+/* --- Primary generate button --- */
+.qwen-generate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #fff;
+  background: #0a66c2;
+  border: none;
+  border-radius: 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+  line-height: 1.4;
+}
+
+.qwen-generate-btn:hover {
+  background: #004182;
+}
+
+.qwen-generate-btn:disabled {
+  background: #8cb8e0;
+  cursor: not-allowed;
+}
+
+.qwen-generate-btn .qwen-icon {
+  font-size: 14px;
+}
+
+/* --- Panel overlay (tooltip-like) near the composer --- */
+.qwen-panel {
+  position: absolute;
+  bottom: 100%;
+  left: 8px;
+  z-index: 10000;
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  color: #333;
+  overflow: hidden;
+  animation: qwen-fade-in 0.15s ease;
+}
+
+@keyframes qwen-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Panel header */
+.qwen-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.qwen-panel-header h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.qwen-panel-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  color: #666;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.qwen-panel-close:hover {
+  color: #000;
+}
+
+/* Panel body */
+.qwen-panel-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Tone selector row */
+.qwen-tone-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qwen-tone-row label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  white-space: nowrap;
+}
+
+.qwen-tone-select {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 12px;
+  background: #fff;
+  color: #333;
+  outline: none;
+}
+
+.qwen-tone-select:focus {
+  border-color: #0a66c2;
+}
+
+/* Draft textarea */
+.qwen-draft-area {
+  width: 100%;
+  min-height: 80px;
+  max-height: 200px;
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  color: #333;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+  line-height: 1.45;
+}
+
+.qwen-draft-area:focus {
+  border-color: #0a66c2;
+}
+
+.qwen-draft-area::placeholder {
+  color: #aaa;
+}
+
+/* Action buttons row */
+.qwen-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.qwen-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  border: none;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+
+.qwen-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.qwen-btn-primary {
+  background: #0a66c2;
+  color: #fff;
+}
+
+.qwen-btn-primary:hover:not(:disabled) {
+  background: #004182;
+}
+
+.qwen-btn-secondary {
+  background: #e8e8e8;
+  color: #333;
+}
+
+.qwen-btn-secondary:hover:not(:disabled) {
+  background: #d0d0d0;
+}
+
+.qwen-btn-success {
+  background: #057642;
+  color: #fff;
+}
+
+.qwen-btn-success:hover:not(:disabled) {
+  background: #03512e;
+}
+
+/* Status line */
+.qwen-status {
+  font-size: 11px;
+  min-height: 16px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.qwen-status.error {
+  color: #cc1016;
+}
+
+.qwen-status.success {
+  color: #057642;
+}
+
+.qwen-status.info {
+  color: #666;
+}
+
+/* --- Spinner --- */
+.qwen-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: qwen-spin 0.6s linear infinite;
+  vertical-align: middle;
+}
+
+@keyframes qwen-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* --- Ensure we don't break LinkedIn layout --- */
+.qwen-btn-container,
+.qwen-panel {
+  box-sizing: border-box;
+}
+
+.qwen-btn-container * ,
+.qwen-panel * {
+  box-sizing: border-box;
+}
