@@ -6,19 +6,39 @@
 const DEFAULTS = {
   enabled: true,
   tone: 'professional',
-  maxTurns: 12,
+  maxTurns: '10',
   showApproveSend: false,
+  senderFirstName: '',
+  senderHeadline: '',
 };
 
 const $ = (id) => document.getElementById(id);
+const ALLOWED_MAX_TURNS = new Set(['most-recent', '5', '10', 'all']);
+
+function normalizeMaxTurns(value) {
+  if (ALLOWED_MAX_TURNS.has(String(value))) return String(value);
+
+  // Backward compatibility for older numeric settings.
+  const numeric = parseInt(value, 10);
+  if (!Number.isNaN(numeric)) {
+    if (numeric <= 1) return 'most-recent';
+    if (numeric <= 5) return '5';
+    if (numeric <= 10) return '10';
+    return 'all';
+  }
+
+  return DEFAULTS.maxTurns;
+}
 
 // Load saved settings into the form
 function loadSettings() {
   chrome.storage.sync.get(DEFAULTS, (settings) => {
     $('enabled').checked = settings.enabled;
     $('tone').value = settings.tone;
-    $('maxTurns').value = settings.maxTurns;
+    $('maxTurns').value = normalizeMaxTurns(settings.maxTurns);
     $('showApproveSend').checked = settings.showApproveSend;
+    $('senderFirstName').value = settings.senderFirstName || '';
+    $('senderHeadline').value = settings.senderHeadline || '';
   });
 }
 
@@ -27,12 +47,11 @@ function saveSettings() {
   const settings = {
     enabled: $('enabled').checked,
     tone: $('tone').value,
-    maxTurns: parseInt($('maxTurns').value, 10) || 12,
+    maxTurns: normalizeMaxTurns($('maxTurns').value),
     showApproveSend: $('showApproveSend').checked,
+    senderFirstName: $('senderFirstName').value.trim(),
+    senderHeadline: $('senderHeadline').value.trim(),
   };
-
-  // Clamp maxTurns
-  settings.maxTurns = Math.max(1, Math.min(50, settings.maxTurns));
 
   chrome.storage.sync.set(settings, () => {
     $('status').textContent = '✓ Settings saved';

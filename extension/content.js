@@ -1,5 +1,5 @@
 /**
- * content.js — LinkedIn Auto-Reply (Qwen) Content Script
+ * content.js - LinkedIn Auto-Reply (Qwen) Content Script
  *
  * Injects a "Auto-generate (Qwen)" button into the LinkedIn Messaging composer.
  * Extracts conversation history, calls local backend, and inserts the draft.
@@ -9,21 +9,27 @@
    Configuration & Constants
    ============================================================ */
 
-const DEBUG = false; // Set to true for verbose console logging
+const DEBUG = true; // Set to true for verbose console logging
 const BACKEND_URL = 'http://localhost:3000/linkedin/draft';
 const INJECTION_ID = 'qwen-autoreply-container';
 const PANEL_ID = 'qwen-autoreply-panel';
 const MAX_MSG_LENGTH = 1000; // Truncate individual messages
 const RETRY_MAX = 3; // Exponential backoff retries for backend calls
 const OBSERVER_DEBOUNCE_MS = 500;
+const SENDER_NAME_STORAGE_KEY = 'qwen_sender_names_by_thread';
+let cachedMyFirstName = '';
 
 // Default settings (overridden by chrome.storage.sync)
 let settings = {
   enabled: true,
   tone: 'professional',
-  maxTurns: 12,
+  maxTurns: '10',
   showApproveSend: false,
+  senderFirstName: '',
+  senderHeadline: '',
 };
+let promptedForFirstNameThisSession = false;
+let promptedForHeadlineThisSession = false;
 
 function log(...args) {
   if (DEBUG) console.log('[Qwen AutoReply]', ...args);
@@ -31,6 +37,353 @@ function log(...args) {
 
 function logError(...args) {
   console.error('[Qwen AutoReply]', ...args);
+}
+
+function storageGet(area, key) {
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage[area]) {
+      resolve(undefined);
+      return;
+    }
+    try {
+      chrome.storage[area].get([key], (result) => resolve(result?.[key]));
+    } catch (err) {
+      logError('storageGet failed:', err);
+      resolve(undefined);
+    }
+  });
+}
+
+function storageSet(area, value) {
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage[area]) {
+      resolve();
+      return;
+    }
+    try {
+      chrome.storage[area].set(value, () => resolve());
+    } catch (err) {
+      logError('storageSet failed:', err);
+      resolve();
+    }
+  });
+}
+
+function getThreadId() {
+  const href = window.location.href || '';
+  const match = href.match(/\/messaging\/thread\/([^/?#]+)/i);
+  if (match && match[1]) return match[1];
+
+  const urnNode = document.querySelector('[data-urn*="messaging-thread"], [data-urn*="fsd_message"]');
+  const urn = urnNode?.getAttribute('data-urn') || '';
+  if (urn) return urn;
+
+  return 'current';
+}
+
+function cleanPersonName(name) {
+  if (!name || typeof name !== 'string') return '';
+  let cleaned = name.replace(/\s+/g, ' ').trim();
+  cleaned = cleaned.replace(/\b(you|linkedin|messaging)\b/gi, '').trim();
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  return cleaned;
+}
+
+function extractFirstName(name) {
+  const cleaned = cleanPersonName(name);
+  if (!cleaned) return '';
+
+  const withoutSuffix = cleaned.replace(/\b(MBA|PhD|MD|Jr|Sr|II|III|IV)\b\.?/gi, '').trim();
+  const parts = withoutSuffix.split(/[,\s]+/).filter(Boolean);
+  if (parts.length === 0) return '';
+
+  let first = parts[0].replace(/[^A-Za-z'-]/g, '');
+  if (!first) return '';
+
+  // Normalize casing to avoid shout-case names.
+  first = first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+  return first;
+}
+
+function extractSenderFullNameFromThread() {
+  const selectors = [
+    // Main conversation header name (top of thread)
+    'h2.msg-entity-lockup__entity-title',
+    // Name label above message groups in the chat
+    'span.msg-s-message-group__profile-link.msg-s-message-group__name',
+    // Profile-card "New message" / profile page header name
+    'a.profile-card-one-to-one__profile-link span.truncate',
+    // Fallback: any truncate span under a profile-card link wrapper
+    'span.display-flex.truncate.align-items-center a.profile-card-one-to-one__profile-link span.truncate',
+    '.msg-thread__link-to-profile .msg-thread__subject',
+    '.msg-overlay-bubble-header__title',
+    '.msg-thread__thread-title',
+    '.msg-s-message-group__name',
+    'a[href*="/in/"] span[aria-hidden="true"]',
+    '[data-control-name="overlay.close_conversation_window"] ~ * [aria-hidden="true"]',
+  ];
+
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const name = cleanPersonName(el.innerText || el.textContent || '');
+    if (name && !/^you$/i.test(name)) return name;
+  }
+
+  return '';
+}
+
+function extractIntroducedFirstName(conversation) {
+  if (!Array.isArray(conversation)) return '';
+
+  const introPatterns = [
+    /\b(?:my name is|i am|i'm|im|this is)\s+([A-Za-z][A-Za-z'-]{1,30})\b/i,
+    /\b(?:it's|its)\s+([A-Za-z][A-Za-z'-]{1,30})\b/i,
+  ];
+
+  for (let i = conversation.length - 1; i >= 0; i--) {
+    const msg = conversation[i];
+    if (!msg || msg.role !== 'them' || typeof msg.text !== 'string') continue;
+
+    for (const re of introPatterns) {
+      const match = msg.text.match(re);
+      if (!match || !match[1]) continue;
+      const first = extractFirstName(match[1]);
+      if (first && !/^(I|Im|It|Its|This)$/i.test(first)) return first;
+    }
+  }
+
+  return '';
+}
+
+async function resolveSenderFirstName(conversation) {
+  const threadId = getThreadId();
+  const nameMap = (await storageGet('local', SENDER_NAME_STORAGE_KEY)) || {};
+  const cached = nameMap[threadId] || {};
+
+  const detectedFullName = extractSenderFullNameFromThread();
+  const detectedFirstName = extractFirstName(detectedFullName);
+
+  if (detectedFullName && detectedFirstName) {
+    nameMap[threadId] = {
+      fullName: detectedFullName,
+      firstName: detectedFirstName,
+      updatedAt: Date.now(),
+    };
+    await storageSet('local', { [SENDER_NAME_STORAGE_KEY]: nameMap });
+  }
+
+  const introducedFirstName = extractIntroducedFirstName(conversation);
+  if (introducedFirstName) return introducedFirstName;
+
+  return detectedFirstName || cached.firstName || '';
+}
+
+function applyRecipientNameFallback(draft, firstName) {
+  if (!draft) return draft;
+
+  // Hard-disable em/en/horizontal dashes in UI draft text.
+  let normalized = draft.replace(/[\u2012\u2013\u2014\u2015]/g, '-');
+
+  if (!firstName) return normalized;
+  return normalized.replace(/\[Name\]/gi, firstName);
+}
+
+function extractMyFirstName() {
+  if (cachedMyFirstName) return cachedMyFirstName;
+
+  const selectors = [
+    '.global-nav__me span[aria-hidden="true"]',
+    '.global-nav__me-photo + span',
+    '[data-control-name="identity_welcome_message"]',
+  ];
+
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const text = (el.innerText || el.textContent || '').trim();
+    const first = extractFirstName(text);
+    // Ignore generic labels like "Me" which are not real names
+    if (first && !/^(me|you)$/i.test(first)) {
+      cachedMyFirstName = first;
+      return first;
+    }
+  }
+
+  // Fallback: use the alt text from the global nav profile photo
+  const mePhoto = document.querySelector('img.global-nav__me-photo[alt]');
+  if (mePhoto) {
+    const altText = (mePhoto.getAttribute('alt') || '').trim();
+    const first = extractFirstName(altText);
+    if (first) {
+      cachedMyFirstName = first;
+      return first;
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Normalizes a LinkedIn profile headline string and truncates it to the main role/company
+ * by cutting before common separators like "|" or "•".
+ * @param {string} raw
+ * @returns {string}
+ */
+function normalizeHeadlineSnippet(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  let text = raw.replace(/\s+/g, ' ').trim();
+
+  // Remove surrounding quotation marks if present
+  text = text.replace(/^"+|"+$/g, '').trim();
+  if (!text) return '';
+
+  // Cut at the first common divider (|, •, ·) with spaces around it
+  const parts = text.split(/\s[|•·]\s/);
+  text = (parts[0] || text).trim();
+
+  return text;
+}
+
+function getHeadlineFromOpenMeMenu() {
+  const menuList = document.querySelector(
+    'ul[aria-label="Me menu"], ul[aria-label*="Me"], .global-nav__me-menu ul[role="menu"], .global-nav__me-menu ul[aria-label]'
+  );
+  if (!menuList) return '';
+
+  const menuRoot =
+    menuList.closest('.global-nav__me-menu') ||
+    menuList.closest('[role="menu"]') ||
+    menuList.parentElement;
+  if (!menuRoot) return '';
+
+  const subtitle =
+    menuRoot.querySelector('.artdeco-entity-lockup__subtitle') ||
+    menuRoot.querySelector('[class*="entity-lockup__subtitle"]');
+  if (!subtitle) return '';
+
+  const raw =
+    subtitle.getAttribute('title') ||
+    subtitle.getAttribute('aria-label') ||
+    subtitle.innerText ||
+    subtitle.textContent ||
+    '';
+
+  return normalizeHeadlineSnippet(raw);
+}
+
+function getHeadlineFromSidebar() {
+  const selectors = [
+    '.profile-card-member-details .profile-card-headline',
+    'a.profile-card-one-to-one__profile-link p.profile-card-headline',
+    '.artdeco-card .profile-card-headline',
+  ];
+
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const raw =
+      el.getAttribute('title') ||
+      el.getAttribute('aria-label') ||
+      el.innerText ||
+      el.textContent ||
+      '';
+    const snippet = normalizeHeadlineSnippet(raw);
+    if (snippet) return snippet;
+  }
+
+  return '';
+}
+
+/**
+ * Attempts to read the current user's profile headline (role/company)
+ * from visible LinkedIn UI.
+ * @returns {string}
+ */
+function extractMyHeadline() {
+  const fromOpenMeMenu = getHeadlineFromOpenMeMenu();
+  if (fromOpenMeMenu) return fromOpenMeMenu;
+
+  const fromSidebar = getHeadlineFromSidebar();
+  if (fromSidebar) return fromSidebar;
+
+  const selectors = [
+    // Subtitle in the "Me" dropdown in the global nav
+    '.global-nav__me .artdeco-entity-lockup__subtitle',
+    '.global-nav__me div.artdeco-entity-lockup__subtitle',
+  ];
+
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const raw = (el.innerText || el.textContent || '').trim();
+    const snippet = normalizeHeadlineSnippet(raw);
+    if (snippet) return snippet;
+  }
+
+  return '';
+}
+
+function needsSenderProfileEnrichment() {
+  const first = (settings.senderFirstName || '').trim();
+  const headline = (settings.senderHeadline || '').trim();
+  return !first || !headline;
+}
+
+function needsFirstNamePrompt() {
+  return !(settings.senderFirstName || '').trim() && !promptedForFirstNameThisSession;
+}
+
+function needsHeadlinePrompt() {
+  return !(settings.senderHeadline || '').trim() && !promptedForHeadlineThisSession;
+}
+
+/**
+ * If we don't yet have a saved sender profile, try to detect it from the
+ * current page and offer to save it to settings so it persists across pages.
+ */
+async function maybePromptToSaveProfile() {
+  if (!needsFirstNamePrompt() && !needsHeadlinePrompt()) return;
+  if (/^\/in\//i.test(window.location.pathname || '')) return;
+
+  const currentFirst = (settings.senderFirstName || '').trim();
+  const currentHeadline = (settings.senderHeadline || '').trim();
+
+  // If we already have both a name and a headline saved, nothing to do.
+  if (currentFirst && currentHeadline) return;
+
+  // Try to detect missing pieces from the page.
+  let detectedFirst = currentFirst || extractMyFirstName();
+  let detectedHeadline = currentHeadline;
+  if (!detectedHeadline) {
+    detectedHeadline = extractMyHeadline();
+  }
+
+  const update = {};
+  if (needsFirstNamePrompt() && detectedFirst) {
+    update.senderFirstName = detectedFirst;
+  }
+  if (needsHeadlinePrompt() && detectedHeadline) {
+    update.senderHeadline = detectedHeadline;
+  }
+
+  const attemptedFirstName = needsFirstNamePrompt() && !!detectedFirst;
+  const attemptedHeadline = needsHeadlinePrompt() && !!detectedHeadline;
+
+  const headlinePart = detectedHeadline ? `, "${detectedHeadline}"` : '';
+  const nameForPrompt = detectedFirst || currentFirst || 'your profile';
+  const confirmMsg =
+    `Profile detected!\n\n` +
+    `Would you like to save "${nameForPrompt}"${headlinePart} for future messages?`;
+
+  if (Object.keys(update).length > 0 && window.confirm(confirmMsg)) {
+    await storageSet('sync', update);
+    settings = { ...settings, ...update };
+  }
+
+  if (attemptedFirstName) promptedForFirstNameThisSession = true;
+  if (attemptedHeadline) promptedForHeadlineThisSession = true;
 }
 
 /* ============================================================
@@ -60,6 +413,13 @@ if (typeof chrome !== 'undefined' && chrome.storage) {
         settings[key] = newValue;
         log(`Setting "${key}" changed to:`, newValue);
       }
+
+      if (key === 'senderFirstName' && newValue) {
+        promptedForFirstNameThisSession = false;
+      }
+      if (key === 'senderHeadline' && newValue) {
+        promptedForHeadlineThisSession = false;
+      }
     }
     // Re-evaluate injection
     if ('enabled' in changes) {
@@ -73,7 +433,7 @@ if (typeof chrome !== 'undefined' && chrome.storage) {
 }
 
 /* ============================================================
-   Composer Detection — Multiple Selector Fallbacks
+   Composer Detection - Multiple Selector Fallbacks
    ============================================================ */
 
 /**
@@ -152,8 +512,6 @@ function findComposerFormContainer(composer) {
  * @returns {Array<{role: string, text: string}>}
  */
 function extractConversation() {
-  const maxTurns = settings.maxTurns || 12;
-
   // Selectors for individual message items
   const messageListSelectors = [
     '.msg-s-message-list-content .msg-s-event-listitem',
@@ -184,6 +542,8 @@ function extractConversation() {
     log('No message nodes found');
     return [];
   }
+
+  const maxTurns = resolveMaxTurns(settings.maxTurns, messageNodes.length);
 
   // Take the last N nodes
   const recentNodes = messageNodes.slice(-maxTurns);
@@ -220,7 +580,7 @@ function extractConversation() {
 
     // Truncate
     if (text.length > MAX_MSG_LENGTH) {
-      text = text.substring(0, MAX_MSG_LENGTH) + '…';
+      text = text.substring(0, MAX_MSG_LENGTH) + '...';
     }
 
     // Determine role: "me" vs "them"
@@ -231,6 +591,28 @@ function extractConversation() {
 
   log('Extracted conversation:', conversation);
   return conversation;
+}
+
+/**
+ * Resolves max turns setting to an integer based on available message count.
+ * Supports symbolic values and legacy numeric values.
+ * @param {string|number} rawValue
+ * @param {number} totalCount
+ * @returns {number}
+ */
+function resolveMaxTurns(rawValue, totalCount) {
+  if (rawValue === 'all') return totalCount;
+  if (rawValue === 'most-recent') return 1;
+
+  if (rawValue === '5' || rawValue === 5) return Math.min(5, totalCount);
+  if (rawValue === '10' || rawValue === 10) return Math.min(10, totalCount);
+
+  const numeric = parseInt(rawValue, 10);
+  if (!Number.isNaN(numeric) && numeric > 0) {
+    return Math.min(numeric, totalCount);
+  }
+
+  return Math.min(10, totalCount);
 }
 
 /**
@@ -353,19 +735,27 @@ function insertDraftIntoComposer(text) {
     // Focus the composer
     composer.focus();
 
-    // Find the inner paragraph if any
-    let target = composer.querySelector('p');
-    if (!target) target = composer;
+    const normalizedText = String(text || '').replace(/\r\n/g, '\n');
 
-    // Set the text
-    target.innerText = text;
+    // Use paragraph nodes so LinkedIn treats line breaks like real Enter presses.
+    composer.innerHTML = '';
+    const lines = normalizedText.split('\n');
+    lines.forEach((line) => {
+      const p = document.createElement('p');
+      if (line.length > 0) {
+        p.textContent = line;
+      } else {
+        p.appendChild(document.createElement('br'));
+      }
+      composer.appendChild(p);
+    });
 
     // Dispatch input event so LinkedIn picks up the change
     const inputEvent = new InputEvent('input', {
       bubbles: true,
       cancelable: true,
       inputType: 'insertText',
-      data: text,
+      data: normalizedText,
     });
     composer.dispatchEvent(inputEvent);
 
@@ -435,7 +825,7 @@ function showPanel(anchorContainer) {
 
   panel.innerHTML = `
     <div class="qwen-panel-header">
-      <h4>✨ Auto-generate Reply</h4>
+      <h4>Auto-generate Reply</h4>
       <button class="qwen-panel-close" title="Close">&times;</button>
     </div>
     <div class="qwen-panel-body">
@@ -450,6 +840,15 @@ function showPanel(anchorContainer) {
       <button class="qwen-btn qwen-btn-primary" id="qwen-generate-draft">
         Generate Draft
       </button>
+      <div class="qwen-template-options hidden" id="qwen-template-options">
+        <div class="qwen-template-options-title">No messages yet. Pick a starter:</div>
+        <button class="qwen-btn qwen-btn-secondary qwen-template-btn" id="qwen-template-connected" type="button">
+          Connected with you
+        </button>
+        <button class="qwen-btn qwen-btn-secondary qwen-template-btn" id="qwen-template-intro" type="button">
+          Self Introduction
+        </button>
+      </div>
       <textarea class="qwen-draft-area" id="qwen-draft-textarea"
         placeholder="Generated draft will appear here. You can edit it before inserting."
         rows="4"></textarea>
@@ -502,10 +901,69 @@ function wireUpPanelEvents(panel) {
   const generateBtn = panel.querySelector('#qwen-generate-draft');
   const insertBtn = panel.querySelector('#qwen-insert-btn');
   const approveSendBtn = panel.querySelector('#qwen-approve-send-btn');
+  const templateOptions = panel.querySelector('#qwen-template-options');
+  const templateConnectedBtn = panel.querySelector('#qwen-template-connected');
+  const templateIntroBtn = panel.querySelector('#qwen-template-intro');
 
   function setStatus(msg, type = 'info') {
     statusEl.textContent = msg;
     statusEl.className = `qwen-status ${type}`;
+  }
+
+  function setGeneratingState(isLoading, loadingText = 'Sending to Qwen...') {
+    generateBtn.disabled = isLoading;
+    generateBtn.innerHTML = isLoading
+      ? '<span class="qwen-spinner"></span> Generating...'
+      : 'Generate Draft';
+    if (isLoading) {
+      setStatus(loadingText, 'info');
+      insertBtn.disabled = true;
+      if (approveSendBtn) approveSendBtn.disabled = true;
+    }
+  }
+
+  function showTemplateOptions(show) {
+    if (!templateOptions) return;
+    templateOptions.classList.toggle('hidden', !show);
+  }
+
+  async function generateStarterFromTemplate(templateType) {
+    const tone = panel.querySelector('#qwen-tone-select').value;
+    const recipientFirstName = await resolveSenderFirstName([]);
+
+    // Use prompt-based enrichment flow (no silent detection from non-messaging contexts).
+    if (needsSenderProfileEnrichment()) {
+      await maybePromptToSaveProfile();
+    }
+    let senderFirstName = (settings.senderFirstName || '').trim();
+    let senderHeadline = (settings.senderHeadline || '').trim();
+
+    setGeneratingState(true, 'Generating starter message...');
+    draftArea.value = '';
+    showTemplateOptions(false);
+
+    try {
+      const draft = await callBackend({
+        conversation: [],
+        tone,
+        recipientFirstName,
+        senderFirstName,
+        senderHeadline,
+        starterTemplate: templateType,
+        model: 'qwen-plus',
+        redact: false,
+      });
+
+      draftArea.value = applyRecipientNameFallback(draft, recipientFirstName);
+      insertBtn.disabled = false;
+      if (approveSendBtn) approveSendBtn.disabled = false;
+      setStatus('Draft generated! Edit if needed, then click Insert.', 'success');
+    } catch (err) {
+      setStatus(`Error: ${err.message}`, 'error');
+      logError('Template generation failed:', err);
+    } finally {
+      setGeneratingState(false);
+    }
   }
 
   // Enable insert button when draft area has text
@@ -523,28 +981,28 @@ function wireUpPanelEvents(panel) {
     // Extract conversation
     const conversation = extractConversation();
     if (conversation.length === 0) {
-      setStatus('No messages found in this thread. Open a conversation first.', 'error');
+      showTemplateOptions(true);
+      setStatus('No messages found in this thread. Choose a starter option.', 'info');
       return;
     }
+    showTemplateOptions(false);
 
     const tone = panel.querySelector('#qwen-tone-select').value;
 
-    generateBtn.disabled = true;
-    generateBtn.innerHTML = '<span class="qwen-spinner"></span> Generating…';
-    setStatus('Sending to Qwen…', 'info');
+    setGeneratingState(true);
     draftArea.value = '';
-    insertBtn.disabled = true;
-    if (approveSendBtn) approveSendBtn.disabled = true;
 
     try {
+      const recipientFirstName = await resolveSenderFirstName(conversation);
       const draft = await callBackend({
         conversation,
         tone,
+        recipientFirstName,
         model: 'qwen-plus',
         redact: false,
       });
 
-      draftArea.value = draft;
+      draftArea.value = applyRecipientNameFallback(draft, recipientFirstName);
       insertBtn.disabled = false;
       if (approveSendBtn) approveSendBtn.disabled = false;
       setStatus('Draft generated! Edit if needed, then click Insert.', 'success');
@@ -552,10 +1010,25 @@ function wireUpPanelEvents(panel) {
       setStatus(`Error: ${err.message}`, 'error');
       logError('Generation failed:', err);
     } finally {
-      generateBtn.disabled = false;
-      generateBtn.innerHTML = 'Generate Draft';
+      setGeneratingState(false);
     }
   });
+
+  if (templateConnectedBtn) {
+    templateConnectedBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      await generateStarterFromTemplate('connected_with_you');
+    });
+  }
+
+  if (templateIntroBtn) {
+    templateIntroBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      await generateStarterFromTemplate('self_introduction');
+    });
+  }
 
   // Insert into Composer
   insertBtn.addEventListener('click', (e) => {
@@ -648,7 +1121,7 @@ function injectButton() {
   const btn = document.createElement('button');
   btn.className = 'qwen-generate-btn';
   btn.type = 'button';
-  btn.innerHTML = '<span class="qwen-icon">✨</span> Auto-generate (Qwen)';
+  btn.innerHTML = '<span class="qwen-icon">*</span> Auto-generate (Qwen)';
   btn.title = 'Generate a reply using Qwen AI';
 
   btn.addEventListener('click', (e) => {
@@ -686,10 +1159,11 @@ function removeInjectedUI() {
 }
 
 /* ============================================================
-   MutationObserver — Re-inject on LinkedIn SPA Navigation
+   MutationObserver - Re-inject on LinkedIn SPA Navigation
    ============================================================ */
 
 let observerDebounceTimer = null;
+let observerInitialized = false;
 
 function tryInject() {
   if (!settings.enabled) return;
@@ -697,10 +1171,18 @@ function tryInject() {
 }
 
 function setupObserver() {
+  if (observerInitialized) return;
+  observerInitialized = true;
+
   const observer = new MutationObserver(() => {
     // Debounce to avoid excessive re-checks
     clearTimeout(observerDebounceTimer);
     observerDebounceTimer = setTimeout(() => {
+      // Try to detect and persist sender profile early when DOM changes
+      if (needsSenderProfileEnrichment()) {
+        maybePromptToSaveProfile();
+      }
+
       // Check if our button still exists; if not, re-inject
       if (!document.getElementById(INJECTION_ID)) {
         log('Button missing, re-injecting...');
@@ -731,6 +1213,14 @@ async function init() {
     return;
   }
 
+  // Start observing early so we can recover/inject as the DOM changes
+  setupObserver();
+
+  // Initial attempt to detect and persist sender profile on first load
+  if (needsSenderProfileEnrichment()) {
+    maybePromptToSaveProfile();
+  }
+
   // Initial injection attempt with retries
   let injected = false;
   for (let i = 0; i < 10; i++) {
@@ -747,9 +1237,9 @@ async function init() {
     log('Could not inject on initial load; observer will keep trying');
   }
 
-  // Watch for DOM changes (SPA navigation, thread switches)
-  setupObserver();
+  // Observer already initialized above.
 }
 
 // Start
 init();
+

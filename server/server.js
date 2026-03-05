@@ -58,7 +58,7 @@ app.options('*', cors());
 
 // JSON body parser (limit payload size)
 app.use(express.json({ limit: '100kb' }));
-
+  
 /* ============================================================
    Rate Limiting (simple in-memory per IP per minute)
    ============================================================ */
@@ -129,6 +129,7 @@ function redactPII(text) {
 
 const VALID_TONES = ['professional', 'friendly', 'concise'];
 const VALID_ROLES = ['me', 'them'];
+const VALID_STARTER_TEMPLATES = ['connected_with_you', 'self_introduction'];
 
 /**
  * Validates the incoming request body.
@@ -140,11 +141,22 @@ function validateRequest(body) {
     return { valid: false, error: 'Request body must be a JSON object.' };
   }
 
-  const { conversation, tone } = body;
+  const {
+    conversation,
+    tone,
+    recipientFirstName,
+    senderFirstName,
+    starterTemplate,
+    senderHeadline,
+  } = body;
 
   // conversation
-  if (!Array.isArray(conversation) || conversation.length === 0) {
-    return { valid: false, error: '"conversation" must be a non-empty array.' };
+  if (!Array.isArray(conversation)) {
+    return { valid: false, error: '"conversation" must be an array.' };
+  }
+
+  if (conversation.length === 0 && !starterTemplate) {
+    return { valid: false, error: '"conversation" must be non-empty unless "starterTemplate" is provided.' };
   }
 
   if (conversation.length > 50) {
@@ -169,6 +181,46 @@ function validateRequest(body) {
     return { valid: false, error: `"tone" must be one of: ${VALID_TONES.join(', ')}` };
   }
 
+  // recipientFirstName (optional)
+  if (recipientFirstName !== undefined) {
+    if (typeof recipientFirstName !== 'string') {
+      return { valid: false, error: '"recipientFirstName" must be a string when provided.' };
+    }
+    if (recipientFirstName.length > 50) {
+      return { valid: false, error: '"recipientFirstName" must be 50 characters or fewer.' };
+    }
+  }
+
+  // senderFirstName (optional)
+  if (senderFirstName !== undefined) {
+    if (typeof senderFirstName !== 'string') {
+      return { valid: false, error: '"senderFirstName" must be a string when provided.' };
+    }
+    if (senderFirstName.length > 50) {
+      return { valid: false, error: '"senderFirstName" must be 50 characters or fewer.' };
+    }
+  }
+
+  // senderHeadline (optional)
+  if (senderHeadline !== undefined) {
+    if (typeof senderHeadline !== 'string') {
+      return { valid: false, error: '"senderHeadline" must be a string when provided.' };
+    }
+    if (senderHeadline.length > 200) {
+      return { valid: false, error: '"senderHeadline" must be 200 characters or fewer.' };
+    }
+  }
+
+  // starterTemplate (optional)
+  if (starterTemplate !== undefined) {
+    if (typeof starterTemplate !== 'string' || !VALID_STARTER_TEMPLATES.includes(starterTemplate)) {
+      return {
+        valid: false,
+        error: `"starterTemplate" must be one of: ${VALID_STARTER_TEMPLATES.join(', ')}`,
+      };
+    }
+  }
+
   return { valid: true };
 }
 
@@ -180,20 +232,68 @@ function validateRequest(body) {
  * Builds the system and user messages for Qwen.
  * @param {Array} conversation
  * @param {string} tone
+ * @param {string} recipientFirstName
+ * @param {string} senderFirstName
+ * @param {string} starterTemplate
+ * @param {string} senderHeadline
  * @returns {{ systemMsg: string, userMsg: string }}
  */
-function buildPrompt(conversation, tone) {
+function buildPrompt(
+  conversation,
+  tone,
+  recipientFirstName = '',
+  senderFirstName = '',
+  starterTemplate = '',
+  senderHeadline = ''
+) {
+  const cleanedFirstName = (recipientFirstName || '').trim();
+  const cleanedSenderName = (senderFirstName || '').trim();
+  const cleanedSenderHeadline = (senderHeadline || '').trim();
   const systemMsg = [
-    'You write natural LinkedIn replies.',
+    'You write natural LinkedIn replies that sound like a real person.',
     `Tone: ${tone || 'professional'}.`,
-    'Keep it short (1–4 sentences).',
+    'Keep it short (1-4 sentences).',
+    'Write with clarity and warmth, not corporate filler.',
+    'Avoid cliches: "Hope you are well", "touch base", "circle back", "kindly", "as per", "at your earliest convenience".',
+    'Use contractions naturally when appropriate (I am, I would, we will).',
+    'Be specific: reference one concrete detail from the last message when possible.',
+    'Vary sentence openings; do not always start with greetings or thanks.',
     'No emojis unless the other person used emojis.',
     'If they ask for a meeting, propose two times.',
     'If unclear, ask one clarifying question.',
-    'Do not mention you are AI.',
-    'Do not add subject lines.',
+    'Do not mention you are AI. Do not add subject lines.',
     'Reply in the same language as the conversation.',
+    'Do not use em dashes or —.',
+    cleanedFirstName
+      ? `Known recipient first name from profile: ${cleanedFirstName}. Use this naturally when needed, but prefer any name they introduce in chat.`
+      : 'Use their name naturally only if known from the conversation.',
+    'Never use placeholders like [Name]. If name is uncertain, do not include a name.',
   ].join(' ');
+
+  if (starterTemplate) {
+    const recipientDisplay = cleanedFirstName || 'there';
+    const senderIntro = cleanedSenderName
+      ? `I am ${cleanedSenderName}${cleanedSenderHeadline ? `, ${cleanedSenderHeadline}` : ''}`
+      : (cleanedSenderHeadline ? `I am ${cleanedSenderHeadline}` : '');
+
+    let templateInstruction = '';
+    if (starterTemplate === 'connected_with_you') {
+      templateInstruction =
+        `Generate a first-contact message based on this intent: "Hi ${recipientDisplay}, thank you for connecting with me, how can I help you?"`;
+    } else if (starterTemplate === 'self_introduction') {
+      templateInstruction = senderIntro
+        ? `Generate a first-contact message based on this intent: "Hi ${recipientDisplay}, ${senderIntro}, pleasure to meet you"`
+        : `Generate a first-contact message based on this intent: "Hi ${recipientDisplay}, pleasure to meet you"`;
+    }
+
+    const userMsg = [
+      'There is no prior chat history in this thread.',
+      templateInstruction,
+      'Keep it natural, concise, and ready to send on LinkedIn.',
+    ].join('\n');
+
+    return { systemMsg, userMsg };
+  }
 
   const transcript = conversation
     .map((msg) => {
@@ -205,6 +305,17 @@ function buildPrompt(conversation, tone) {
   const userMsg = `Conversation:\n${transcript}\n\nWrite my next reply:`;
 
   return { systemMsg, userMsg };
+}
+
+function sanitizeDraftOutput(text) {
+  if (!text || typeof text !== 'string') return '';
+  // Hard-disable em/en/horizontal dashes in generated output.
+  const withCapitalizedNextWord = text.replace(
+    /[\u2012\u2013\u2014\u2015]\s*([A-Za-z])/g,
+    (_match, nextChar) => `\n\n${nextChar.toUpperCase()}`
+  );
+
+  return withCapitalizedNextWord.replace(/[\u2012\u2013\u2014\u2015]\s*/g, '\n\n');
 }
 
 /* ============================================================
@@ -261,7 +372,7 @@ async function callQwen(systemMsg, userMsg, model = 'qwen-plus') {
   }
 
   console.log('✅ Draft generated successfully');
-  return draft.trim();
+  return sanitizeDraftOutput(draft.trim());
 }
 
 /* ============================================================
@@ -282,7 +393,16 @@ app.post('/linkedin/draft', rateLimit, async (req, res) => {
       return res.status(400).json({ error: validation.error });
     }
 
-    let { conversation, tone, model, redact } = req.body;
+    let {
+      conversation,
+      tone,
+      model,
+      redact,
+      recipientFirstName,
+      senderFirstName,
+      starterTemplate,
+      senderHeadline,
+    } = req.body;
     tone = tone || 'professional';
     model = model || 'qwen-plus';
 
@@ -296,7 +416,14 @@ app.post('/linkedin/draft', rateLimit, async (req, res) => {
     }
 
     // 3. Build prompt
-    const { systemMsg, userMsg } = buildPrompt(conversation, tone);
+    const { systemMsg, userMsg } = buildPrompt(
+      conversation,
+      tone,
+      recipientFirstName,
+      senderFirstName,
+      starterTemplate,
+      senderHeadline
+    );
 
     // 4. Call Qwen
     const draft = await callQwen(systemMsg, userMsg, model);

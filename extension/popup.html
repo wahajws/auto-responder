@@ -30,7 +30,8 @@
       color: #555;
     }
     .field select,
-    .field input[type="number"] {
+    .field input,
+    .field textarea {
       width: 100%;
       padding: 6px 8px;
       border: 1px solid #ccc;
@@ -39,7 +40,8 @@
       outline: none;
     }
     .field select:focus,
-    .field input:focus {
+    .field input:focus,
+    .field textarea:focus {
       border-color: #0a66c2;
     }
     .toggle-row {
@@ -130,7 +132,22 @@
 
   <div class="field">
     <label for="maxTurns">Max Conversation Turns</label>
-    <input type="number" id="maxTurns" min="1" max="50" value="12" />
+    <select id="maxTurns">
+      <option value="most-recent">Most Recent</option>
+      <option value="5">5</option>
+      <option value="10">10</option>
+      <option value="all">All</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="senderFirstName">My First Name (optional)</label>
+    <input id="senderFirstName" type="text" placeholder="e.g. Javan" />
+  </div>
+
+  <div class="field">
+    <label for="senderHeadline">My Title / Headline (optional)</label>
+    <textarea id="senderHeadline" rows="2" placeholder="e.g. AI &amp; Data Analytics Intern at AMAST Sdn Bhd"></textarea>
   </div>
 
   <div class="toggle-row">

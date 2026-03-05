@@ -135,6 +135,31 @@
   border-color: #0a66c2;
 }
 
+.qwen-template-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #e3e3e3;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.qwen-template-options-title {
+  font-size: 12px;
+  color: #555;
+  font-weight: 600;
+}
+
+.qwen-template-btn {
+  border-radius: 8px;
+  text-align: left;
+}
+
+.hidden {
+  display: none !important;
+}
+
 /* Draft textarea */
 .qwen-draft-area {
   width: 100%;
