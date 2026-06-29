@@ -17,6 +17,7 @@ const BACKEND_URL = `${BACKEND_BASE_URL}/linkedin/draft`;
 const INJECTION_ID = 'qwen-autoreply-container';
 const PANEL_ID = 'qwen-autoreply-panel';
 const SEARCH_TOOL_ID = 'qwen-people-search-tool';
+const SEARCH_PLAN_STORAGE_KEY = 'qwen_people_search_plan';
 const MAX_MSG_LENGTH = 1000; // Truncate individual messages
 const RETRY_MAX = 3; // Exponential backoff retries for backend calls
 const OBSERVER_DEBOUNCE_MS = 500;
@@ -70,6 +71,12 @@ let extensionContextActive = true;
 let isSearchContactFetchRunning = false;
 let peopleSearchToolManuallyClosed = false;
 let contactFinderMessageHandlersRegistered = false;
+let peopleSearchApolloState = {
+  prompt: '',
+  plan: null,
+  results: [],
+  pagination: null,
+};
 
 function log(...args) {
   if (DEBUG) console.log('[Qwen AutoReply]', ...args);
@@ -2350,14 +2357,8 @@ function normalizeWhitespace(text) {
   return (text || '').replace(/\s+/g, ' ').trim();
 }
 
-function buildSearchKeywords(rolePrompt, locationPrompt) {
-  const role = normalizeWhitespace(rolePrompt);
-  const location = normalizeWhitespace(locationPrompt);
-  return [role, location].filter(Boolean).join(' ');
-}
-
-function buildPeopleSearchUrl(rolePrompt, locationPrompt) {
-  const keywords = buildSearchKeywords(rolePrompt, locationPrompt);
+function buildPeopleSearchUrl(searchKeywords) {
+  const keywords = normalizeWhitespace(searchKeywords);
   if (!keywords) return '';
   const url = new URL('https://www.linkedin.com/search/results/people/');
   url.searchParams.set('keywords', keywords);
@@ -2365,19 +2366,167 @@ function buildPeopleSearchUrl(rolePrompt, locationPrompt) {
   return url.toString();
 }
 
+async function generatePeopleSearchPlan(promptText) {
+  const prompt = normalizeWhitespace(promptText);
+  if (!prompt) {
+    throw new Error('Enter a search prompt first.');
+  }
+
+  const data = await callApi('/linkedin/people-search/plan', {
+    prompt,
+    model: 'qwen-plus',
+  });
+
+  return {
+    prompt,
+    searchKeywords: normalizeWhitespace(data?.searchKeywords || ''),
+    minConnections: Number.isFinite(Number(data?.minConnections))
+      ? Math.max(0, parseInt(data.minConnections, 10) || 0)
+      : 0,
+    locationIncludes: Array.isArray(data?.locationIncludes)
+      ? data.locationIncludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    headlineIncludes: Array.isArray(data?.headlineIncludes)
+      ? data.headlineIncludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    headlineExcludes: Array.isArray(data?.headlineExcludes)
+      ? data.headlineExcludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    personTitles: Array.isArray(data?.personTitles)
+      ? data.personTitles.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    personLocations: Array.isArray(data?.personLocations)
+      ? data.personLocations.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    includeKeywords: Array.isArray(data?.includeKeywords)
+      ? data.includeKeywords.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    excludeKeywords: Array.isArray(data?.excludeKeywords)
+      ? data.excludeKeywords.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    page: Number.isFinite(Number(data?.page))
+      ? Math.max(1, parseInt(data.page, 10) || 1)
+      : 1,
+    perPage: Number.isFinite(Number(data?.perPage))
+      ? Math.min(100, Math.max(1, parseInt(data.perPage, 10) || 10))
+      : 10,
+  };
+}
+
+async function searchApolloPeopleFromBackend(promptText, page = 1, perPage = 10) {
+  return callApi('/apollo/people/search', {
+    prompt: normalizeWhitespace(promptText),
+    page,
+    perPage,
+  });
+}
+
+async function enrichApolloPeopleFromBackend(people, revealPersonalEmails = true, revealPhoneNumber = true) {
+  return callApi('/apollo/people/enrich', {
+    people,
+    revealPersonalEmails,
+    revealPhoneNumber,
+  });
+}
+
+function formatApolloSearchResults(results, plan = null, pagination = null, meta = null) {
+  const rows = [];
+  if (plan?.searchKeywords) rows.push(`Apollo query: ${plan.searchKeywords}`);
+  if (plan?.personTitles?.length) rows.push(`Titles: ${plan.personTitles.join(', ')}`);
+  if (plan?.personLocations?.length) rows.push(`Locations: ${plan.personLocations.join(', ')}`);
+  if (plan?.includeKeywords?.length) rows.push(`Include keywords: ${plan.includeKeywords.join(', ')}`);
+  if (plan?.excludeKeywords?.length) rows.push(`Exclude keywords: ${plan.excludeKeywords.join(', ')}`);
+  if (meta?.unsupportedFilters?.length) {
+    rows.push(`Ignored filters: ${meta.unsupportedFilters.join(', ')}`);
+  }
+  if (pagination) {
+    rows.push(`Page: ${pagination.page} | Per page: ${pagination.perPage} | Has more: ${pagination.hasMore ? 'Yes' : 'No'}`);
+  }
+  rows.push('');
+
+  results.forEach((item, index) => {
+    rows.push(`${index + 1}. ${item.name || 'Unknown'}`);
+    rows.push(`Title: ${item.title || 'Unknown'}`);
+    rows.push(`Company: ${item.company || 'Unknown'}`);
+    rows.push(`Location: ${item.location || 'Unknown'}`);
+    rows.push(`LinkedIn: ${item.linkedinUrl || 'None'}`);
+    rows.push(`Apollo Person ID: ${item.apolloPersonId || 'Unknown'}`);
+    rows.push('');
+  });
+
+  return rows.join('\n').trim();
+}
+
+function formatApolloEnrichedResults(results, plan = null) {
+  const rows = [];
+  if (plan?.searchKeywords) rows.push(`Apollo query: ${plan.searchKeywords}`);
+  rows.push('');
+  results.forEach((item, index) => {
+    rows.push(`${index + 1}. ${item.name || 'Unknown'}`);
+    rows.push(`Title: ${item.title || 'Unknown'}`);
+    rows.push(`Company: ${item.company || 'Unknown'}`);
+    rows.push(`Location: ${item.location || 'Unknown'}`);
+    rows.push(`LinkedIn: ${item.linkedinUrl || 'None'}`);
+    rows.push(`Emails: ${(item.emails || []).join(', ') || 'None found'}`);
+    rows.push(`Phones: ${(item.phones || []).join(', ') || 'None found'}`);
+    rows.push(`Apollo Person ID: ${item.apolloPersonId || 'Unknown'}`);
+    rows.push('');
+  });
+  return rows.join('\n').trim();
+}
+
+function textIncludesAnyTerm(text, terms = []) {
+  const haystack = normalizeWhitespace(text).toLowerCase();
+  if (!haystack) return terms.length === 0;
+  return terms.some((term) => haystack.includes(normalizeWhitespace(term).toLowerCase()));
+}
+
+function textIncludesAllTerms(text, terms = []) {
+  const haystack = normalizeWhitespace(text).toLowerCase();
+  return terms.every((term) => haystack.includes(normalizeWhitespace(term).toLowerCase()));
+}
+
 function extractCandidateLocationText(card) {
   if (!card) return '';
-  const selectors = [
-    '.entity-result__secondary-subtitle',
-    '.entity-result__primary-subtitle',
-    '.t-14.t-normal',
-    '[class*="entity-result__summary"]',
-  ];
-  for (const sel of selectors) {
-    const el = card.querySelector(sel);
-    const text = normalizeWhitespace(el?.textContent || '');
-    if (text) return text;
+  const lines = (card.innerText || card.textContent || '')
+    .split(/\r?\n/)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+
+  const blockedLinePattern = (
+    /^(connect|follow|message|add|pending|more|save)$/i
+  );
+  const blockedContentPattern = (
+    /degree connection|mutual connection|followers?|reactivate premium|cancel anytime|status is offline|provides services|current:|past:|skills:/i
+  );
+
+  const candidates = lines.filter((line) => (
+    !blockedLinePattern.test(line) &&
+    !blockedContentPattern.test(line) &&
+    !/^https?:/i.test(line) &&
+    !/\/in\//i.test(line) &&
+    !/^\d+(st|nd|rd|th)\+?$/i.test(line)
+  ));
+
+  for (const line of candidates) {
+    if (
+      /kuala lumpur|selangor|malaysia|singapore|indonesia|jakarta|ampang|petaling jaya|sungai buloh|sepang|central region|wp\.?/i.test(line)
+    ) {
+      return line;
+    }
   }
+
+  for (const line of candidates) {
+    if (
+      !/[|@]/.test(line) &&
+      line.length >= 3 &&
+      line.length <= 80 &&
+      !/\b(sales executive|executive|manager|specialist|director|analyst|engineer|developer)\b/i.test(line)
+    ) {
+      return line;
+    }
+  }
+
   return '';
 }
 
@@ -2435,6 +2584,24 @@ function extractCandidateHeadlineText(card, profileName = '') {
   ));
 
   return filteredLines[1] || filteredLines[0] || '';
+}
+
+function extractCandidateConnectionCount(card) {
+  if (!card) return 0;
+  const lines = (card.innerText || card.textContent || '')
+    .split(/\r?\n/)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const match = line.match(/(\d[\d,]*)(\+)?\s+connections?\b/i);
+    if (!match) continue;
+    const base = parseInt((match[1] || '').replace(/,/g, ''), 10);
+    if (!Number.isFinite(base)) continue;
+    return match[2] ? base : base;
+  }
+
+  return 0;
 }
 
 function findSearchResultCard(anchor) {
@@ -2500,8 +2667,9 @@ function isBlockedPeopleAnchor(anchor) {
 function collectCandidatePeopleAnchors() {
   const directSelectors = [
     'a[data-view-name="search-result-lockup-title"][href*="/in/"]',
-    'a[href*="/in/"][data-view-name*="search-result-lockup"]',
-    'a[href*="/in/"][data-view-name*="search-result"]',
+    'a[href*="/in/"][data-view-name="search-result-lockup-title"]',
+    '.reusable-search__result-container a[href*="/in/"][data-view-name*="search-result"]',
+    '[role="listitem"] a[href*="/in/"][data-view-name*="search-result"]',
   ];
   const seenUrls = new Set();
   const results = [];
@@ -2523,26 +2691,6 @@ function collectCandidatePeopleAnchors() {
     if (results.length > 0) return results;
   }
 
-  const containers = Array.from(document.querySelectorAll(
-    'main, .search-results-container, .reusable-search__entity-result-list, ul[role="list"]'
-  ));
-  const roots = containers.length > 0 ? containers : [document.body];
-  for (const root of roots) {
-    const anchors = Array.from(root.querySelectorAll('a[href*="/in/"]'));
-    for (const anchor of anchors) {
-      if (isBlockedPeopleAnchor(anchor)) continue;
-
-      const profileUrl = stripLinkedInProfileUrl(anchor.href);
-      if (!profileUrl || seenUrls.has(profileUrl)) continue;
-
-      const name = extractAnchorDisplayName(anchor);
-      if (!name || name.length < 3) continue;
-
-      seenUrls.add(profileUrl);
-      results.push(anchor);
-    }
-  }
-
   return results;
 }
 
@@ -2550,6 +2698,7 @@ function extractPrimaryProfileAnchorFromCard(card) {
   if (!card) return null;
   const prioritySelectors = [
     'a[data-view-name="search-result-lockup-title"][href*="/in/"]',
+    'a[href*="/in/"][data-view-name="search-result-lockup-title"]',
     'a[href*="/in/"][data-view-name*="search-result"]',
   ];
 
@@ -2558,52 +2707,23 @@ function extractPrimaryProfileAnchorFromCard(card) {
     if (anchor && !isBlockedPeopleAnchor(anchor)) return anchor;
   }
 
-  const anchors = Array.from(card.querySelectorAll('a[href*="/in/"]'));
-  for (const anchor of anchors) {
-    if (isBlockedPeopleAnchor(anchor)) continue;
-    const name = extractAnchorDisplayName(anchor);
-    if (!name || name.length < 3) continue;
-    return anchor;
-  }
-
   return null;
 }
 
 function collectProfilesFromHtmlFallback(locationFilter = '') {
-  const lowerLocationFilter = normalizeWhitespace(locationFilter).toLowerCase();
-  const html = document.body?.innerHTML || '';
-  const results = [];
-  const seen = new Set();
-  const regex = /<a[^>]+href="([^"]*\/in\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-
-  while ((match = regex.exec(html)) !== null) {
-    const profileUrl = stripLinkedInProfileUrl(match[1]);
-    if (!profileUrl || seen.has(profileUrl)) continue;
-
-    const rawName = normalizeWhitespace(match[2].replace(/<[^>]+>/g, ' '));
-    if (!rawName || rawName.length < 3) continue;
-    if (/contact info|message|connect/i.test(rawName)) continue;
-
-    if (lowerLocationFilter) {
-      const nearby = html.slice(Math.max(0, match.index - 600), Math.min(html.length, match.index + 1200)).toLowerCase();
-      if (!nearby.includes(lowerLocationFilter)) continue;
-    }
-
-    seen.add(profileUrl);
-    results.push({
-      name: rawName,
-      profileUrl,
-      location: 'Unknown',
-      headline: '',
-    });
-  }
-
-  return results;
+  void locationFilter;
+  return [];
 }
 
-function collectPeopleSearchProfiles(locationFilter = '') {
-  const lowerLocationFilter = normalizeWhitespace(locationFilter).toLowerCase();
+// Deprecated in Apollo mode. Kept temporarily to avoid mixing refactor risk into the
+// LinkedIn auto-reply feature surface. The active Contact Finder path no longer uses
+// LinkedIn DOM prospect discovery.
+function collectPeopleSearchProfiles(options = {}) {
+  const lowerLocationFilter = normalizeWhitespace(options.locationFilter || '').toLowerCase();
+  const minConnections = Math.max(0, parseInt(options.minConnections || 0, 10) || 0);
+  const locationIncludes = Array.isArray(options.locationIncludes) ? options.locationIncludes : [];
+  const headlineIncludes = Array.isArray(options.headlineIncludes) ? options.headlineIncludes : [];
+  const headlineExcludes = Array.isArray(options.headlineExcludes) ? options.headlineExcludes : [];
   const anchors = collectCandidatePeopleAnchors();
   const seen = new Set();
   const profiles = [];
@@ -2616,19 +2736,35 @@ function collectPeopleSearchProfiles(locationFilter = '') {
     if (!card) continue;
     if (!cardHasProspectAction(card)) continue;
 
-    const cardText = normalizeWhitespace(card.textContent || '');
-    if (!cardText) continue;
-
+    const primaryAnchor = extractPrimaryProfileAnchorFromCard(card) || anchor;
+    const name = extractAnchorDisplayName(primaryAnchor);
+    if (!name || name.length < 3) continue;
+    if (/status is offline|degree connection|mutual connection/i.test(name)) continue;
     const locationText = extractCandidateLocationText(card);
     if (lowerLocationFilter && !locationText.toLowerCase().includes(lowerLocationFilter)) {
       continue;
     }
+    if (locationIncludes.length > 0 && !textIncludesAnyTerm(locationText, locationIncludes)) {
+      continue;
+    }
+    const headline = extractCandidateHeadlineText(card, name);
+    if (headlineIncludes.length > 0 && !textIncludesAllTerms(headline, headlineIncludes)) {
+      continue;
+    }
+    if (headlineExcludes.length > 0 && textIncludesAnyTerm(headline, headlineExcludes)) {
+      continue;
+    }
+    const connectionCount = extractCandidateConnectionCount(card);
+    if (minConnections > 0 && connectionCount < minConnections) {
+      continue;
+    }
 
-    const name = normalizeWhitespace(anchor.textContent || '') || profileUrl;
     profiles.push({
       name,
       profileUrl,
       location: locationText || 'Unknown',
+      headline,
+      connectionCount,
     });
     seen.add(profileUrl);
   }
@@ -2647,53 +2783,57 @@ function extractUniqueMatches(text, pattern, normalizer) {
   return Array.from(set);
 }
 
+// Deprecated in Apollo mode. The active Contact Finder path no longer scrapes
+// LinkedIn contact overlays or profile pages for enrichment.
 function extractContactInfoFromHtml(html, sourceUrl) {
-  const plainText = normalizeWhitespace(
-    html
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-  );
-
-  const emails = extractUniqueMatches(
-    plainText,
-    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
-    (v) => v.toLowerCase()
-  );
-
-  const phones = extractUniqueMatches(
-    plainText,
-    /(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,4}\d{2,4}/g,
-    (v) => normalizeWhitespace(v).replace(/[^\d+]/g, '')
-  ).filter((v) => v.replace(/\D/g, '').length >= 7);
-
-  const urls = extractUniqueMatches(
-    html,
-    /https?:\/\/[^\s"'<>]+/gi,
-    (v) => v.replace(/[),.;]+$/, '')
-  ).filter((v) => !/\/(jobs|feed|search)\//i.test(v));
+  const emails = [];
+  const phones = [];
+  const urls = [];
+  const isAllowedExternalUrl = (href) => {
+    try {
+      const parsed = new URL(href, sourceUrl);
+      if (!/^https?:$/i.test(parsed.protocol)) return false;
+      if (/(\.|^)linkedin\.com$/i.test(parsed.hostname)) return false;
+      if (/(\.|^)licdn\.com$/i.test(parsed.hostname)) return false;
+      return true;
+    } catch (_err) {
+      return false;
+    }
+  };
 
   try {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const hrefs = Array.from(doc.querySelectorAll('a[href]'))
-      .map((a) => a.getAttribute('href') || '')
-      .map((href) => {
-        try {
-          return new URL(href, sourceUrl).toString();
-        } catch (_err) {
-          return '';
+    const anchors = Array.from(doc.querySelectorAll('a[href]'));
+
+    for (const anchor of anchors) {
+      const rawHref = (anchor.getAttribute('href') || '').trim();
+      if (!rawHref) continue;
+
+      if (/^mailto:/i.test(rawHref)) {
+        const email = rawHref.replace(/^mailto:/i, '').trim().toLowerCase();
+        if (email && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(email)) {
+          emails.push(email);
         }
-      })
-      .filter(Boolean);
-    for (const href of hrefs) {
-      if (/^mailto:/i.test(href)) {
-        const email = href.replace(/^mailto:/i, '').trim().toLowerCase();
-        if (email) emails.push(email);
-      } else if (/^tel:/i.test(href)) {
-        const phone = href.replace(/^tel:/i, '').trim().replace(/[^\d+]/g, '');
-        if (phone) phones.push(phone);
-      } else if (/^https?:/i.test(href) && !/linkedin\.com\/(feed|search|jobs)\//i.test(href)) {
-        urls.push(href);
+        continue;
+      }
+
+      if (/^tel:/i.test(rawHref)) {
+        const phone = rawHref.replace(/^tel:/i, '').trim().replace(/[^\d+]/g, '');
+        if (phone && phone.replace(/\D/g, '').length >= 7 && phone.replace(/\D/g, '').length <= 15) {
+          phones.push(phone);
+        }
+        continue;
+      }
+
+      let absoluteHref = '';
+      try {
+        absoluteHref = new URL(rawHref, sourceUrl).toString();
+      } catch (_err) {
+        absoluteHref = '';
+      }
+
+      if (absoluteHref && isAllowedExternalUrl(absoluteHref)) {
+        urls.push(absoluteHref);
       }
     }
   } catch (_err) {
@@ -2707,6 +2847,7 @@ function extractContactInfoFromHtml(html, sourceUrl) {
   };
 }
 
+// Deprecated in Apollo mode. Apollo enrichment is now the source of truth.
 async function fetchProfileContactInfo(profileUrl) {
   const trimmedProfileUrl = stripLinkedInProfileUrl(profileUrl);
   if (!trimmedProfileUrl) {
@@ -2718,7 +2859,6 @@ async function fetchProfileContactInfo(profileUrl) {
     `${noTrailingSlash}/overlay/contact-info/`,
     `${noTrailingSlash}/details/contact-info/`,
     `${noTrailingSlash}/detail/contact-info/`,
-    trimmedProfileUrl,
   ];
 
   for (const url of candidateUrls) {
@@ -2751,6 +2891,8 @@ function formatFetchedContacts(results) {
     rows.push(`${item.index}. ${item.name}`);
     rows.push(`Profile: ${item.profileUrl}`);
     rows.push(`Search location: ${item.location}`);
+    rows.push(`Headline: ${item.headline || 'Unknown'}`);
+    rows.push(`Connections: ${item.connectionCount || 0}`);
     if (item.contact?.sourceUrl) rows.push(`Source: ${item.contact.sourceUrl}`);
     rows.push(`Emails: ${(item.contact?.emails || []).join(', ') || 'None found'}`);
     rows.push(`Phones: ${(item.contact?.phones || []).join(', ') || 'None found'}`);
@@ -2807,21 +2949,69 @@ function registerContactFinderMessageHandlers() {
    Contact Finder Helpers
    ============================================================ */
 
-async function savePeopleSearchInputs(roleInput, locationInput) {
+async function savePeopleSearchPlan(plan) {
   await storageSet('local', {
-    qwen_people_search_inputs: {
-      role: normalizeWhitespace(roleInput),
-      location: normalizeWhitespace(locationInput),
+    [SEARCH_PLAN_STORAGE_KEY]: {
+      prompt: normalizeWhitespace(plan?.prompt || ''),
+      searchKeywords: normalizeWhitespace(plan?.searchKeywords || ''),
+      minConnections: Math.max(0, parseInt(plan?.minConnections || 0, 10) || 0),
+      locationIncludes: Array.isArray(plan?.locationIncludes)
+        ? plan.locationIncludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+        : [],
+      headlineIncludes: Array.isArray(plan?.headlineIncludes)
+        ? plan.headlineIncludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+        : [],
+      headlineExcludes: Array.isArray(plan?.headlineExcludes)
+        ? plan.headlineExcludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+        : [],
+      personTitles: Array.isArray(plan?.personTitles)
+        ? plan.personTitles.map((item) => normalizeWhitespace(item)).filter(Boolean)
+        : [],
+      personLocations: Array.isArray(plan?.personLocations)
+        ? plan.personLocations.map((item) => normalizeWhitespace(item)).filter(Boolean)
+        : [],
+      includeKeywords: Array.isArray(plan?.includeKeywords)
+        ? plan.includeKeywords.map((item) => normalizeWhitespace(item)).filter(Boolean)
+        : [],
+      excludeKeywords: Array.isArray(plan?.excludeKeywords)
+        ? plan.excludeKeywords.map((item) => normalizeWhitespace(item)).filter(Boolean)
+        : [],
+      page: Math.max(1, parseInt(plan?.page || 1, 10) || 1),
+      perPage: Math.min(100, Math.max(1, parseInt(plan?.perPage || 10, 10) || 10)),
       updatedAt: Date.now(),
     },
   });
 }
 
-async function loadPeopleSearchInputs() {
-  const saved = await storageGet('local', 'qwen_people_search_inputs');
+async function loadPeopleSearchPlan() {
+  const saved = await storageGet('local', SEARCH_PLAN_STORAGE_KEY);
   return {
-    role: normalizeWhitespace(saved?.role || ''),
-    location: normalizeWhitespace(saved?.location || ''),
+    prompt: normalizeWhitespace(saved?.prompt || ''),
+    searchKeywords: normalizeWhitespace(saved?.searchKeywords || ''),
+    minConnections: Math.max(0, parseInt(saved?.minConnections || 0, 10) || 0),
+    locationIncludes: Array.isArray(saved?.locationIncludes)
+      ? saved.locationIncludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    headlineIncludes: Array.isArray(saved?.headlineIncludes)
+      ? saved.headlineIncludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    headlineExcludes: Array.isArray(saved?.headlineExcludes)
+      ? saved.headlineExcludes.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    personTitles: Array.isArray(saved?.personTitles)
+      ? saved.personTitles.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    personLocations: Array.isArray(saved?.personLocations)
+      ? saved.personLocations.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    includeKeywords: Array.isArray(saved?.includeKeywords)
+      ? saved.includeKeywords.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    excludeKeywords: Array.isArray(saved?.excludeKeywords)
+      ? saved.excludeKeywords.map((item) => normalizeWhitespace(item)).filter(Boolean)
+      : [],
+    page: Math.max(1, parseInt(saved?.page || 1, 10) || 1),
+    perPage: Math.min(100, Math.max(1, parseInt(saved?.perPage || 10, 10) || 10)),
   };
 }
 
@@ -2832,13 +3022,11 @@ function renderSearchToolMarkup() {
       <button type="button" class="qwen-search-tool-minimize" id="qwen-search-tool-minimize" title="Collapse panel">-</button>
     </div>
     <div class="qwen-search-tool-body" id="qwen-search-tool-body">
-      <label for="qwen-search-role">Role prompt</label>
-      <input id="qwen-search-role" type="text" placeholder="e.g. data scientist" />
-      <label for="qwen-search-location">Location filter</label>
-      <input id="qwen-search-location" type="text" placeholder="e.g. Kuala Lumpur" />
+      <label for="qwen-search-prompt">Search prompt</label>
+      <input id="qwen-search-prompt" type="text" placeholder="e.g. looking for sales executive in malaysia with lots of connections" />
       <div class="qwen-search-tool-actions">
         <button type="button" class="qwen-btn qwen-btn-primary" id="qwen-search-apply-btn">Apply Search</button>
-        <button type="button" class="qwen-btn qwen-btn-secondary" id="qwen-search-fetch-btn">Count + Fetch</button>
+        <button type="button" class="qwen-btn qwen-btn-secondary" id="qwen-search-fetch-btn">Fetch</button>
       </div>
       <div class="qwen-status info" id="qwen-search-status">Ready.</div>
       <textarea id="qwen-search-results" class="qwen-search-results" placeholder="Fetched contact info will appear here." readonly></textarea>
@@ -2885,8 +3073,7 @@ async function injectPeopleSearchTool(forceOpen = false) {
 
   const body = container.querySelector('#qwen-search-tool-body');
   const minimizeBtn = container.querySelector('#qwen-search-tool-minimize');
-  const roleInput = container.querySelector('#qwen-search-role');
-  const locationInput = container.querySelector('#qwen-search-location');
+  const promptInput = container.querySelector('#qwen-search-prompt');
   const applyBtn = container.querySelector('#qwen-search-apply-btn');
   const fetchBtn = container.querySelector('#qwen-search-fetch-btn');
   const statusEl = container.querySelector('#qwen-search-status');
@@ -2897,27 +3084,54 @@ async function injectPeopleSearchTool(forceOpen = false) {
     statusEl.textContent = message;
   };
 
-  const persistedInputs = await loadPeopleSearchInputs();
-  roleInput.value = persistedInputs.role;
-  locationInput.value = persistedInputs.location;
+  const persistedPlan = await loadPeopleSearchPlan();
+  promptInput.value = persistedPlan.prompt;
+  if (peopleSearchApolloState.results.length > 0) {
+    resultsArea.value = formatApolloSearchResults(
+      peopleSearchApolloState.results,
+      peopleSearchApolloState.plan,
+      peopleSearchApolloState.pagination
+    );
+  }
 
   minimizeBtn.addEventListener('click', () => {
     setPeopleSearchToolCollapsed(!container.classList.contains('collapsed'));
   });
 
   applyBtn.addEventListener('click', async () => {
-    const rolePrompt = roleInput.value;
-    const locationPrompt = locationInput.value;
-    await savePeopleSearchInputs(rolePrompt, locationPrompt);
+    try {
+      const promptText = promptInput.value;
+      if (!normalizeWhitespace(promptText)) {
+        setSearchStatus('Enter a search prompt first.', 'error');
+        return;
+      }
 
-    const nextUrl = buildPeopleSearchUrl(rolePrompt, locationPrompt);
-    if (!nextUrl) {
-      setSearchStatus('Enter at least a role prompt.', 'error');
-      return;
+      setSearchStatus('Planning and searching Apollo prospects...', 'info');
+      const searchResponse = await searchApolloPeopleFromBackend(promptText, 1, 10);
+      const plan = {
+        ...(searchResponse?.meta?.plan || {}),
+        prompt: normalizeWhitespace(promptText),
+      };
+      await savePeopleSearchPlan(plan);
+      peopleSearchApolloState = {
+        prompt: normalizeWhitespace(promptText),
+        plan,
+        results: Array.isArray(searchResponse?.results) ? searchResponse.results : [],
+        pagination: searchResponse?.pagination || null,
+      };
+      resultsArea.value = formatApolloSearchResults(
+        peopleSearchApolloState.results,
+        plan,
+        peopleSearchApolloState.pagination,
+        searchResponse?.meta || null
+      );
+      setSearchStatus(
+        `Apollo returned ${peopleSearchApolloState.results.length} prospect(s).`,
+        'success'
+      );
+    } catch (err) {
+      setSearchStatus(`Apollo search failed: ${err?.message || String(err)}`, 'error');
     }
-
-    setSearchStatus('Opening LinkedIn people search...', 'info');
-    window.location.href = nextUrl;
   });
 
   fetchBtn.addEventListener('click', async () => {
@@ -2927,40 +3141,68 @@ async function injectPeopleSearchTool(forceOpen = false) {
     applyBtn.disabled = true;
 
     try {
-      const rolePrompt = roleInput.value;
-      const locationPrompt = locationInput.value;
-      await savePeopleSearchInputs(rolePrompt, locationPrompt);
+      const promptText = promptInput.value;
+      let plan = peopleSearchApolloState.plan;
+      let searchResults = peopleSearchApolloState.results;
 
-      const profiles = collectPeopleSearchProfiles(locationPrompt);
-      const count = profiles.length;
-      const confirmText = `${count} profiles found. Would you like to fetch their contact info?`;
+      if (
+        !plan ||
+        normalizeWhitespace(peopleSearchApolloState.prompt) !== normalizeWhitespace(promptText)
+      ) {
+        setSearchStatus('Searching Apollo prospects before enrichment...', 'info');
+        const searchResponse = await searchApolloPeopleFromBackend(promptText, 1, 10);
+        plan = {
+          ...(searchResponse?.meta?.plan || {}),
+          prompt: normalizeWhitespace(promptText),
+        };
+        searchResults = Array.isArray(searchResponse?.results) ? searchResponse.results : [];
+        peopleSearchApolloState = {
+          prompt: normalizeWhitespace(promptText),
+          plan,
+          results: searchResults,
+          pagination: searchResponse?.pagination || null,
+        };
+      }
+
+      await savePeopleSearchPlan(plan);
+
+      const count = searchResults.length;
+      const confirmText = `${count} Apollo prospect(s) found. Would you like to enrich their contact info?`;
       if (!window.confirm(confirmText)) {
         setSearchStatus('Fetch cancelled.', 'info');
         return;
       }
 
       if (!count) {
-        setSearchStatus('No profiles matched the current filters.', 'error');
+        setSearchStatus('No Apollo prospects matched the current prompt.', 'error');
         return;
       }
 
-      const results = [];
-      for (let i = 0; i < profiles.length; i++) {
-        const profile = profiles[i];
-        setSearchStatus(`Fetching ${i + 1}/${profiles.length}: ${profile.name}`, 'info');
-        const contact = await fetchProfileContactInfo(profile.profileUrl);
-        results.push({
-          index: i + 1,
-          ...profile,
-          contact,
-        });
-      }
-
-      const summary = formatFetchedContacts(results);
-      resultsArea.value = summary || 'No contact data found.';
-      setSearchStatus(`Done. Processed ${results.length} profile(s).`, 'success');
+      setSearchStatus(`Enriching ${count} Apollo prospect(s)...`, 'info');
+      const enrichmentInput = searchResults.map((person) => ({
+        name: person.name,
+        first_name: person.firstName,
+        last_name: person.lastName,
+        organization_name: person.company,
+        website_url: person.companyDomain,
+        linkedin_url: person.linkedinUrl,
+        email: person.emails?.[0] || '',
+      }));
+      const enrichResponse = await enrichApolloPeopleFromBackend(
+        enrichmentInput,
+        true,
+        true
+      );
+      const enrichedResults = Array.isArray(enrichResponse?.results) ? enrichResponse.results : [];
+      peopleSearchApolloState = {
+        ...peopleSearchApolloState,
+        plan,
+        results: enrichedResults,
+      };
+      resultsArea.value = formatApolloEnrichedResults(enrichedResults, plan) || 'No contact data found.';
+      setSearchStatus(`Done. Enriched ${enrichedResults.length} Apollo prospect(s).`, 'success');
     } catch (err) {
-      setSearchStatus(`Contact fetch failed: ${err?.message || String(err)}`, 'error');
+      setSearchStatus(`Apollo enrichment failed: ${err?.message || String(err)}`, 'error');
     } finally {
       fetchBtn.disabled = false;
       applyBtn.disabled = false;
@@ -2974,11 +3216,7 @@ async function injectPeopleSearchTool(forceOpen = false) {
 async function openPeopleSearchToolFromPopup() {
   peopleSearchToolManuallyClosed = false;
   if (!isPeopleSearchPage()) {
-    const saved = await loadPeopleSearchInputs();
-    const nextUrl =
-      buildPeopleSearchUrl(saved.role, saved.location) ||
-      'https://www.linkedin.com/search/results/people/?origin=SWITCH_SEARCH_VERTICAL';
-    window.location.href = nextUrl;
+    window.location.href = 'https://www.linkedin.com/search/results/people/?origin=SWITCH_SEARCH_VERTICAL';
     return { ok: true, navigated: true };
   }
   await injectPeopleSearchTool(true);

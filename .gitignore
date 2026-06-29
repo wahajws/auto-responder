@@ -5,6 +5,9 @@ node_modules/
 .env
 **/.env
 
+# OAuth tokens (secrets)
+server/data/google_tokens.json
+
 # OS files
 .DS_Store
 Thumbs.db
