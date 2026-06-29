@@ -18,7 +18,7 @@ import express from 'express';
 import cors from 'cors';
 
 /* ============================================================
-   Configuration
+   Configuration 
    ============================================================ */
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
@@ -26,6 +26,9 @@ const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 const ALIBABA_LLM_API_BASE_URL =
   process.env.ALIBABA_LLM_API_BASE_URL ||
   'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/google/auth/callback`;
 
 // Chat completions endpoint (OpenAI-compatible format)
 const CHAT_COMPLETIONS_URL = `${ALIBABA_LLM_API_BASE_URL.replace(/\/+$/, '')}/chat/completions`;
