@@ -7,17 +7,79 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      width: 300px;
+      --popup-padding: 8px;
+      --panel-width: 280px;
+      --panel-gap: 8px;
+      width: calc((var(--popup-padding) * 2) + var(--panel-width));
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       font-size: 13px;
       color: #333;
-      padding: 16px;
+      padding: var(--popup-padding);
       background: #fff;
+      overflow: visible;
+      transition: width 0.2s ease;
+    }
+    body.settings-open {
+      width: calc((var(--popup-padding) * 2) + (var(--panel-width) * 2) + var(--panel-gap));
+    }
+    .popup-layout {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--panel-gap);
+      width: 100%;
+    }
+    .settings-panel {
+      width: 0;
+      opacity: 0;
+      max-height: 0;
+      overflow: hidden;
+      transition: width 0.2s ease, opacity 0.2s ease, max-height 0.2s ease;
+    }
+    body.settings-open .settings-panel {
+      width: var(--panel-width);
+      opacity: 1;
+      max-height: 2000px;
+    }
+    .main-panel {
+      width: var(--panel-width);
+      flex: 0 0 var(--panel-width);
     }
     h2 {
       font-size: 15px;
-      margin-bottom: 14px;
       color: #0a66c2;
+    }
+    .header-row {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      margin-bottom: 14px;
+    }
+    .settings-panel h2 {
+      margin-bottom: 14px;
+    }
+    .toggle-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .settings-toggle-btn {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 50%;
+      border: 1px solid #c8d2dc;
+      background: #f8fafc;
+      color: #0a66c2;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .settings-toggle-btn:hover {
+      background: #eef3f8;
     }
     .field {
       margin-bottom: 12px;
@@ -30,7 +92,8 @@
       color: #555;
     }
     .field select,
-    .field input[type="number"] {
+    .field input,
+    .field textarea {
       width: 100%;
       padding: 6px 8px;
       border: 1px solid #ccc;
@@ -39,7 +102,8 @@
       outline: none;
     }
     .field select:focus,
-    .field input:focus {
+    .field input:focus,
+    .field textarea:focus {
       border-color: #0a66c2;
     }
     .toggle-row {
@@ -53,7 +117,6 @@
       font-weight: 600;
       color: #555;
     }
-    /* Toggle switch */
     .switch {
       position: relative;
       width: 40px;
@@ -109,40 +172,110 @@
   </style>
 </head>
 <body>
-  <h2>⚙️ LinkedIn Auto-Reply</h2>
+  <div class="popup-layout">
+    <aside class="settings-panel" id="settingsPanel">
+      <h2>Settings</h2>
 
-  <div class="toggle-row">
-    <span>Extension Enabled</span>
-    <label class="switch">
-      <input type="checkbox" id="enabled" />
-      <span class="slider"></span>
-    </label>
+      <div class="field">
+        <label for="tone">Default Tone</label>
+        <select id="tone">
+          <option value="professional">Professional</option>
+          <option value="friendly">Friendly</option>
+          <option value="concise">Concise</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="maxTurns">Max Conversation Turns</label>
+        <select id="maxTurns">
+          <option value="most-recent">Most Recent</option>
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="all">All</option>
+        </select>
+      </div>
+
+      <div class="toggle-row">
+        <span>Show "Approve &amp; Send" Button</span>
+        <label class="switch">
+          <input type="checkbox" id="showApproveSend" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <span>Auto-accept in My Network</span>
+        <label class="switch">
+          <input type="checkbox" id="autoAcceptMyNetwork" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <span>Send intro message after accepting</span>
+        <label class="switch">
+          <input type="checkbox" id="autoIntroMyNetwork" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <span>Enable Calendar Scheduling</span>
+        <label class="switch">
+          <input type="checkbox" id="calendarSchedulingEnabled" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <span>Auto-reply continuously</span>
+        <label class="switch">
+          <input type="checkbox" id="autoReplyContinuously" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="field">
+        <label>Google Calendar</label>
+        <div id="calendarStatusText" style="font-size:12px;color:#555;margin-bottom:8px;">Checking connection...</div>
+        <div style="display:flex;gap:8px;">
+          <button class="save-btn" id="connectCalendarBtn" style="margin-top:0;flex:1;">Connect</button>
+          <button class="save-btn" id="disconnectCalendarBtn" style="margin-top:0;flex:1;background:#666;">Disconnect</button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <div class="header-row">
+        <h2>LinkedIn Auto-Reply</h2>
+      </div>
+
+      <div class="toggle-row">
+        <span>Extension Enabled</span>
+        <div class="toggle-controls">
+          <button id="settingsToggleBtn" class="settings-toggle-btn" type="button" title="Open settings" aria-label="Open settings">&#9881;</button>
+          <label class="switch">
+            <input type="checkbox" id="enabled" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="senderFirstName">My First Name (optional)</label>
+        <input id="senderFirstName" type="text" placeholder="e.g. Javan" />
+      </div>
+
+      <div class="field">
+        <label for="senderHeadline">My Title / Headline (optional)</label>
+        <textarea id="senderHeadline" rows="2" placeholder="e.g. AI &amp; Data Analytics Intern at AMAST Sdn Bhd"></textarea>
+      </div>
+
+      <button class="save-btn" id="saveBtn">Save</button>
+      <button class="save-btn" id="togglePeopleFinderBtn" type="button">Open Contact Finder</button>
+      <div class="status" id="status"></div>
+    </main>
   </div>
-
-  <div class="field">
-    <label for="tone">Default Tone</label>
-    <select id="tone">
-      <option value="professional">Professional</option>
-      <option value="friendly">Friendly</option>
-      <option value="concise">Concise</option>
-    </select>
-  </div>
-
-  <div class="field">
-    <label for="maxTurns">Max Conversation Turns</label>
-    <input type="number" id="maxTurns" min="1" max="50" value="12" />
-  </div>
-
-  <div class="toggle-row">
-    <span>Show "Approve &amp; Send" Button</span>
-    <label class="switch">
-      <input type="checkbox" id="showApproveSend" />
-      <span class="slider"></span>
-    </label>
-  </div>
-
-  <button class="save-btn" id="saveBtn">Save Settings</button>
-  <div class="status" id="status"></div>
 
   <script src="popup.js"></script>
 </body>
